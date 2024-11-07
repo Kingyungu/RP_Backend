@@ -1,8 +1,30 @@
 import app from "./app.js";
-import { validateOpenAIConfig, loadEnvConfig } from "./utils/openaiServiceValidator.js";
 import { testOpenAIConnection } from "./utils/openaiConfig.js";
 import assistantService from "./utils/assistantService.js";
 import ErrorHandler from "./middlewares/error.js";
+
+const validateConfig = () => {
+  const apiKey = process.env.OPENAI_API_KEY;
+  const orgId = process.env.OPENAI_ORGANIZATION_ID;
+  
+  if (!apiKey) {
+    throw new Error('OPENAI_API_KEY environment variable is missing');
+  }
+  
+  if (!orgId) {
+    throw new Error('OPENAI_ORGANIZATION_ID environment variable is missing');
+  }
+  
+  if (!apiKey.startsWith('sk-') && !apiKey.startsWith('proj-')) {
+    throw new Error('Invalid API key format - should start with sk- or proj-');
+  }
+  
+  if (!orgId.startsWith('org-')) {
+    throw new Error('Invalid organization ID format - should start with org-');
+  }
+  
+  return true;
+};
 
 const validateAssistantService = async () => {
   try {
@@ -18,35 +40,10 @@ const validateAssistantService = async () => {
 
 const startServer = async () => {
   try {
-    // Try to load config.env but don't fail if it doesn't exist
-    try {
-      await loadEnvConfig();
-      console.log('Loaded configuration from config.env');
-    } catch (error) {
-      console.log('No config.env file found, will use environment variables');
-    }
-
-    // Check if required environment variables are set directly
-    const envConfigExists = process.env.OPENAI_API_KEY && process.env.OPENAI_ORGANIZATION_ID;
-    
-    // Validate OpenAI configuration
-    console.log('Validating OpenAI configuration...');
-    const validation = await validateOpenAIConfig();
-    
-    if (!validation.isValid) {
-      console.error('OpenAI configuration issues found:');
-      validation.issues.forEach(issue => console.error(`- ${issue}`));
-      
-      if (envConfigExists) {
-        console.log('Found OpenAI configuration in environment variables');
-      } else {
-        console.error('No valid configuration found in environment variables or config.env');
-        process.exit(1);
-      }
-    } else {
-      console.log('OpenAI configuration is valid');
-      console.log('Configuration details:', validation.config);
-    }
+    // Simple environment variable validation
+    console.log('Validating configuration...');
+    validateConfig();
+    console.log('Configuration is valid');
 
     // Validate Assistant Service
     const assistantValid = await validateAssistantService();
@@ -86,9 +83,7 @@ const startServer = async () => {
 const gracefulShutdown = async (signal) => {
   console.log(`\n${signal} received. Starting graceful shutdown...`);
   try {
-    // Clean up assistant service resources if needed
     await assistantService.cleanup();
-    
     console.log('Graceful shutdown completed');
     process.exit(0);
   } catch (error) {
