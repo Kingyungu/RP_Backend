@@ -1,4 +1,3 @@
-// server.js
 import app from "./app.js";
 import { validateOpenAIConfig, loadEnvConfig } from "./utils/openaiServiceValidator.js";
 import { testOpenAIConnection } from "./utils/openaiConfig.js";
@@ -19,15 +18,31 @@ const validateAssistantService = async () => {
 
 const startServer = async () => {
   try {
-    await loadEnvConfig();
+    // Try to load config.env but don't fail if it doesn't exist
+    try {
+      await loadEnvConfig();
+      console.log('Loaded configuration from config.env');
+    } catch (error) {
+      console.log('No config.env file found, will use environment variables');
+    }
+
+    // Check if required environment variables are set directly
+    const envConfigExists = process.env.OPENAI_API_KEY && process.env.OPENAI_ORGANIZATION_ID;
+    
     // Validate OpenAI configuration
     console.log('Validating OpenAI configuration...');
     const validation = await validateOpenAIConfig();
+    
     if (!validation.isValid) {
       console.error('OpenAI configuration issues found:');
       validation.issues.forEach(issue => console.error(`- ${issue}`));
-      console.error('Please fix these issues in your config.env file');
-      process.exit(1);
+      
+      if (envConfigExists) {
+        console.log('Found OpenAI configuration in environment variables');
+      } else {
+        console.error('No valid configuration found in environment variables or config.env');
+        process.exit(1);
+      }
     } else {
       console.log('OpenAI configuration is valid');
       console.log('Configuration details:', validation.config);
