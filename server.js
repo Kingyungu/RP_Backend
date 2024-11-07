@@ -1,6 +1,6 @@
 // server.js
 import app from "./app.js";
-import { validateOpenAIConfig } from "./utils/openaiServiceValidator.js";
+import { validateOpenAIConfig, loadEnvConfig } from "./utils/openaiServiceValidator.js";
 import { testOpenAIConnection } from "./utils/openaiConfig.js";
 import assistantService from "./utils/assistantService.js";
 import ErrorHandler from "./middlewares/error.js";
@@ -19,6 +19,7 @@ const validateAssistantService = async () => {
 
 const startServer = async () => {
   try {
+    await loadEnvConfig();
     // Validate OpenAI configuration
     console.log('Validating OpenAI configuration...');
     const validation = await validateOpenAIConfig();
