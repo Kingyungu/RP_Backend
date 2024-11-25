@@ -2,25 +2,44 @@ import app from "./app.js";
 import { testOpenAIConnection } from "./utils/openaiConfig.js";
 import assistantService from "./utils/assistantService.js";
 import ErrorHandler from "./middlewares/error.js";
+import { config } from "dotenv";
+import path from 'path';
+import { fileURLToPath } from 'url';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
+// Load environment-specific configuration
+const environment = process.env.NODE_ENV || 'development';
+config({
+  path: path.join(__dirname, `config/${environment}.env`)
+});
+
+// Enhanced error logging for development
+const isDevelopment = environment === 'development';
 
 const validateConfig = () => {
-  const apiKey = process.env.OPENAI_API_KEY;
-  const orgId = process.env.OPENAI_ORGANIZATION_ID;
+  const requiredEnvVars = [
+    'MONGO_URI',
+    'JWT_SECRET_KEY',
+    'FRONTEND_URL'
+  ];
+
+  const missingVars = requiredEnvVars.filter(varName => !process.env[varName]);
   
-  if (!apiKey) {
-    throw new Error('OPENAI_API_KEY environment variable is missing');
+  if (missingVars.length > 0) {
+    throw new Error(`Missing required environment variables: ${missingVars.join(', ')}`);
   }
-  
-  if (!orgId) {
-    throw new Error('OPENAI_ORGANIZATION_ID environment variable is missing');
-  }
-  
-  if (!apiKey.startsWith('sk-') && !apiKey.startsWith('proj-')) {
-    throw new Error('Invalid API key format - should start with sk- or proj-');
-  }
-  
-  if (!orgId.startsWith('org-')) {
-    throw new Error('Invalid organization ID format - should start with org-');
+
+  // Only validate OpenAI config if it's required
+  if (process.env.OPENAI_API_KEY) {
+    if (!process.env.OPENAI_API_KEY.startsWith('sk-') && !process.env.OPENAI_API_KEY.startsWith('proj-')) {
+      throw new Error('Invalid API key format - should start with sk- or proj-');
+    }
+    
+    if (!process.env.OPENAI_ORGANIZATION_ID?.startsWith('org-')) {
+      throw new Error('Invalid organization ID format - should start with org-');
+    }
   }
   
   return true;
@@ -28,53 +47,70 @@ const validateConfig = () => {
 
 const validateAssistantService = async () => {
   try {
+    if (!process.env.OPENAI_API_KEY) {
+      console.log('OpenAI services not configured, skipping validation');
+      return true;
+    }
+
     console.log('Validating Assistant Service configuration...');
     assistantService.validateConfig();
     console.log('Assistant Service configuration is valid');
     return true;
   } catch (error) {
     console.error('Assistant Service validation failed:', error.message);
-    return false;
+    // Don't fail startup if assistant service fails - just log the error
+    return true;
   }
 };
 
 const startServer = async () => {
   try {
-    // Simple environment variable validation
-    console.log('Validating configuration...');
+    // Validate configuration
+    console.log(`Starting server in ${environment} mode...`);
     validateConfig();
     console.log('Configuration is valid');
 
-    // Validate Assistant Service
-    const assistantValid = await validateAssistantService();
-    if (!assistantValid) {
-      console.error('Assistant Service validation failed. Please check your configuration.');
-      process.exit(1);
-    }
+    // Only test OpenAI if it's configured
+    if (process.env.OPENAI_API_KEY) {
+      // Validate Assistant Service
+      await validateAssistantService();
 
-    // Test OpenAI connection
-    console.log('Testing OpenAI connection...');
-    const connectionTest = await testOpenAIConnection();
-    if (!connectionTest) {
-      throw new ErrorHandler('OpenAI connection test failed', 500);
-    }
-    console.log('OpenAI connection test successful');
+      // Test OpenAI connection
+      console.log('Testing OpenAI connection...');
+      const connectionTest = await testOpenAIConnection();
+      if (!connectionTest) {
+        console.warn('OpenAI connection test failed, but continuing startup');
+      } else {
+        console.log('OpenAI connection test successful');
+      }
 
-    // Test Assistant Service connection
-    console.log('Testing Assistant Service connection...');
-    await assistantService.testConnection();
-    console.log('Assistant Service connection test successful');
+      // Test Assistant Service connection
+      console.log('Testing Assistant Service connection...');
+      await assistantService.testConnection();
+      console.log('Assistant Service connection test successful');
+    } else {
+      console.log('OpenAI services not configured, skipping connection tests');
+    }
 
     // Start server
     const PORT = process.env.PORT || 4000;
-    app.listen(PORT, () => {
-      console.log(`Server running at port ${PORT}`);
+    const server = app.listen(PORT, () => {
+      console.log(`Server running in ${environment} mode on port ${PORT}`);
+    });
+
+    // Handle unhandled promise rejections
+    process.on('unhandledRejection', (err) => {
+      console.log('UNHANDLED REJECTION! 💥 Shutting down...');
+      console.log(err.name, err.message);
+      server.close(() => {
+        process.exit(1);
+      });
     });
 
   } catch (error) {
     console.error('Error starting server:', {
       message: error.message,
-      stack: process.env.NODE_ENV === 'development' ? error.stack : undefined
+      stack: isDevelopment ? error.stack : undefined
     });
     process.exit(1);
   }
@@ -83,7 +119,9 @@ const startServer = async () => {
 const gracefulShutdown = async (signal) => {
   console.log(`\n${signal} received. Starting graceful shutdown...`);
   try {
-    await assistantService.cleanup();
+    if (process.env.OPENAI_API_KEY) {
+      await assistantService.cleanup();
+    }
     console.log('Graceful shutdown completed');
     process.exit(0);
   } catch (error) {
@@ -95,13 +133,6 @@ const gracefulShutdown = async (signal) => {
 // Handle graceful shutdowns
 process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
 process.on('SIGINT', () => gracefulShutdown('SIGINT'));
-
-// Handle unhandled rejections
-process.on('unhandledRejection', (error) => {
-  console.error('UNHANDLED REJECTION! 💥 Shutting down...');
-  console.error(error);
-  process.exit(1);
-});
 
 // Start the server
 startServer();
