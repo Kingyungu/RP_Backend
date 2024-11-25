@@ -45,6 +45,7 @@ app.use(cors(corsOptions));
 app.use((req, res, next) => {
   res.header('Cross-Origin-Embedder-Policy', 'require-corp');
   res.header('Cross-Origin-Opener-Policy', 'same-origin');
+  res.setHeader('Content-Security-Policy', `frame-ancestors ${process.env.FRONTEND_URL}`);
   next();
 });
 
