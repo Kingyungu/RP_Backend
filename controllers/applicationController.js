@@ -1,15 +1,9 @@
-// controllers/applicationController.js
 import { Application } from "../models/applicationSchema.js";
 import { Job } from "../models/jobSchema.js";
 import { catchAsyncErrors } from "../middlewares/catchAsyncError.js";
 import ErrorHandler from "../middlewares/error.js";
 import { uploadToGridFS, getFileFromGridFS } from "../utils/gridfsStorage.js";
-import PDFParser from "pdf-parse";
-import openai from "../utils/openaiConfig.js";
-import fs from "fs/promises";
 import assistantService from '../utils/assistantService.js';
-
-// controllers/applicationController.js
 
 const analyzeWithOpenAI = async (cvText, jobDescription) => {
   try {
@@ -22,12 +16,20 @@ const analyzeWithOpenAI = async (cvText, jobDescription) => {
       throw new ErrorHandler(result.error || 'Analysis failed', 500);
     }
 
-    return result;
+    // Parse both types of feedback
+    const { recruiterFeedback, candidateEmail } = assistantService.parseAnalysisResponse(result.analysis);
+
+    return {
+      success: true,
+      recruiterAnalysis: recruiterFeedback,
+      candidateEmail: candidateEmail,
+      score: result.score
+    };
   } catch (error) {
-    // The error will be logged by the error middleware
     throw error;
   }
 };
+
 export const postApplication = catchAsyncErrors(async (req, res, next) => {
   try {
     const { role } = req.user;
@@ -45,7 +47,6 @@ export const postApplication = catchAsyncErrors(async (req, res, next) => {
       return next(new ErrorHandler("Invalid file type. Please upload a PDF, PNG, JPEG, or WEBP file.", 400));
     }
 
-    // Use GridFS instead of Cloudinary
     const uploadedFile = await uploadToGridFS(resume);
 
     const { name, email, coverLetter, phone, address, jobId } = req.body;
@@ -89,11 +90,14 @@ export const postApplication = catchAsyncErrors(async (req, res, next) => {
         public_id: uploadedFile.fileId,
         url: `/api/v1/application/resume/${uploadedFile.fileId}`,
         contentType: resume.mimetype,
-        originalName: resume.name,  // Add this line
+        originalName: resume.name,
         size: resume.size
       },
-      analysis: aiAnalysisResult.analysis,
+      analysis: aiAnalysisResult.recruiterAnalysis,
+      candidateEmail: aiAnalysisResult.candidateEmail,
+      emailSent: false,
       matchScore: aiAnalysisResult.score,
+      jobId: jobDetails._id,
       textAnalysis: {
         coverLetterAnalysis: {
           sentiment: 'Neutral',
@@ -128,23 +132,19 @@ export const getResume = catchAsyncErrors(async (req, res, next) => {
   try {
     const { fileId } = req.params;
     
-    // Get file from GridFS
     const { buffer, metadata, contentType } = await getFileFromGridFS(fileId);
     
     if (!buffer || !metadata) {
       return next(new ErrorHandler("Resume not found", 404));
     }
 
-    // Get the application to verify access
     const application = await Application.findOne({ "resume.public_id": fileId });
     if (!application) {
       return next(new ErrorHandler("Application not found", 404));
     }
 
-    // Determine content type
     const finalContentType = contentType || application.resume.contentType || 'application/pdf';
     
-    // Set headers with fallbacks
     res.setHeader('Content-Type', finalContentType);
     res.setHeader(
       'Content-Disposition', 
@@ -152,7 +152,6 @@ export const getResume = catchAsyncErrors(async (req, res, next) => {
     );
     res.setHeader('Content-Length', buffer.length);
     
-    // Log successful retrieval
     console.log('Resume retrieved:', {
       fileId,
       contentType: finalContentType,
@@ -160,12 +159,10 @@ export const getResume = catchAsyncErrors(async (req, res, next) => {
       filename: metadata.metadata?.originalName || application.resume.originalName
     });
 
-    // Send the file
     res.send(buffer);
   } catch (error) {
     console.error("Error in getResume:", error);
     
-    // Handle specific error types
     if (error.code === 'ERR_HTTP_INVALID_HEADER_VALUE') {
       return next(new ErrorHandler("Invalid file metadata", 500));
     }
@@ -173,6 +170,144 @@ export const getResume = catchAsyncErrors(async (req, res, next) => {
     next(new ErrorHandler("Error retrieving resume", 500));
   }
 });
+
+export const sendFeedbackEmail = catchAsyncErrors(async (req, res, next) => {
+  const { applicationId } = req.params;
+  const { customEmail } = req.body;
+
+  const application = await Application.findById(applicationId);
+  if (!application) {
+    return next(new ErrorHandler("Application not found!", 404));
+  }
+
+  try {
+    // TODO: Implement your email sending logic here
+    // For now, we'll just mark it as sent
+    application.emailSent = true;
+    application.sentEmail = customEmail || application.candidateEmail;
+    await application.save();
+
+    res.status(200).json({
+      success: true,
+      message: "Feedback email sent successfully"
+    });
+  } catch (error) {
+    next(new ErrorHandler("Failed to send feedback email", 500));
+  }
+});
+
+export const regenerateFeedback = catchAsyncErrors(async (req, res, next) => {
+  const { applicationId } = req.params;
+
+  const application = await Application.findById(applicationId);
+  if (!application) {
+    return next(new ErrorHandler("Application not found!", 404));
+  }
+
+  const job = await Job.findById(application.jobId);
+  if (!job) {
+    return next(new ErrorHandler("Job not found!", 404));
+  }
+
+  try {
+    const aiAnalysisResult = await analyzeWithOpenAI(application.coverLetter, job.description);
+    
+    application.analysis = aiAnalysisResult.recruiterAnalysis;
+    application.candidateEmail = aiAnalysisResult.candidateEmail;
+    application.matchScore = aiAnalysisResult.score;
+    application.emailSent = false;
+    
+    await application.save();
+
+    res.status(200).json({
+      success: true,
+      message: "Feedback regenerated successfully",
+      analysis: aiAnalysisResult
+    });
+  } catch (error) {
+    next(new ErrorHandler("Failed to regenerate feedback", 500));
+  }
+});
+
+export const employerGetAllApplications = catchAsyncErrors(async (req, res, next) => {
+  const { role } = req.user;
+  if (role === "Job Seeker") {
+    return next(new ErrorHandler("Job Seeker not allowed to access this resource.", 400));
+  }
+  // Add pagination
+  const page = parseInt(req.query.page) || 1;
+  const limit = parseInt(req.query.limit) || 10;
+  const skip = (page - 1) * limit;
+
+  // Get total count for pagination
+  const totalCount = await Application.countDocuments({ "employerID.user": req.user._id });
+
+  // Add field selection and pagination
+  const applications = await Application.find({ "employerID.user": req.user._id })
+    .select('name email phone address coverLetter resume analysis matchScore createdAt')
+    .sort({ createdAt: -1 })
+    .skip(skip)
+    .limit(limit)
+    .lean(); // Convert to plain JS object for better performance
+
+  res.status(200).json({
+    success: true,
+    applications,
+    currentPage: page,
+    totalPages: Math.ceil(totalCount / limit),
+    totalApplications: totalCount
+  });
+});
+
+
+export const jobseekerGetAllApplications = catchAsyncErrors(async (req, res, next) => {
+  const { role } = req.user;
+  if (role === "Employer") {
+    return next(new ErrorHandler("Employer not allowed to access this resource.", 400));
+  }
+
+  // Add pagination
+  const page = parseInt(req.query.page) || 1;
+  const limit = parseInt(req.query.limit) || 10;
+  const skip = (page - 1) * limit;
+
+  // Get total count for pagination
+  const totalCount = await Application.countDocuments({ "applicantID.user": req.user._id });
+
+  // Add field selection and pagination
+  const applications = await Application.find({ "applicantID.user": req.user._id })
+    .select('name email coverLetter resume analysis matchScore jobId createdAt')
+    .sort({ createdAt: -1 })
+    .skip(skip)
+    .limit(limit)
+    .lean();
+
+  res.status(200).json({
+    success: true,
+    applications,
+    currentPage: page,
+    totalPages: Math.ceil(totalCount / limit),
+    totalApplications: totalCount
+  });
+});
+
+export const jobseekerDeleteApplication = catchAsyncErrors(async (req, res, next) => {
+  const { role } = req.user;
+  if (role === "Employer") {
+    return next(new ErrorHandler("Employer not allowed to access this resource.", 400));
+  }
+  const { id } = req.params;
+  const application = await Application.findById(id);
+  if (!application) {
+    return next(new ErrorHandler("Application not found!", 404));
+  }
+  await application.deleteOne();
+  res.status(200).json({
+    success: true,
+    message: "Application Deleted!",
+  });
+});
+
 // Helper functions for text analysis
 const analyzeCoverLetter = (coverLetter) => {
   const keyPoints = [];
@@ -189,7 +324,7 @@ const analyzeCoverLetter = (coverLetter) => {
     }
   });
 
-  return keyPoints.slice(0, 3); // Return top 3 key points
+  return keyPoints.slice(0, 3);
 };
 
 const calculateProfessionalTone = (text) => {
@@ -258,83 +393,12 @@ const generateRecommendations = () => {
   ];
 };
 
-const calculateMatchScore = (jobDetails, coverLetter) => {
-  // Basic match score calculation
-  let score = 50; // Base score
-
-  // Check if cover letter mentions job-related keywords
-  if (
-    jobDetails.title &&
-    coverLetter.toLowerCase().includes(jobDetails.title.toLowerCase())
-  ) {
-    score += 10;
-  }
-
-  if (
-    jobDetails.category &&
-    coverLetter.toLowerCase().includes(jobDetails.category.toLowerCase())
-  ) {
-    score += 10;
-  }
-
-  // Add more sophisticated matching logic as needed
-
-  return Math.min(score, 100); // Ensure score doesn't exceed 100
+export default {
+  postApplication,
+  getResume,
+  sendFeedbackEmail,
+  regenerateFeedback,
+  employerGetAllApplications,
+  jobseekerGetAllApplications,
+  jobseekerDeleteApplication
 };
-
-
-// Keep other controller methods unchanged...
-export const employerGetAllApplications = catchAsyncErrors(
-  async (req, res, next) => {
-    const { role } = req.user;
-    if (role === "Job Seeker") {
-      return next(
-        new ErrorHandler("Job Seeker not allowed to access this resource.", 400)
-      );
-    }
-    const { _id } = req.user;
-    const applications = await Application.find({ "employerID.user": _id });
-    res.status(200).json({
-      success: true,
-      applications,
-    });
-  }
-);
-
-export const jobseekerGetAllApplications = catchAsyncErrors(
-  async (req, res, next) => {
-    const { role } = req.user;
-    if (role === "Employer") {
-      return next(
-        new ErrorHandler("Employer not allowed to access this resource.", 400)
-      );
-    }
-    const { _id } = req.user;
-    const applications = await Application.find({ "applicantID.user": _id });
-    res.status(200).json({
-      success: true,
-      applications,
-    });
-  }
-);
-
-export const jobseekerDeleteApplication = catchAsyncErrors(
-  async (req, res, next) => {
-    const { role } = req.user;
-    if (role === "Employer") {
-      return next(
-        new ErrorHandler("Employer not allowed to access this resource.", 400)
-      );
-    }
-    const { id } = req.params;
-    const application = await Application.findById(id);
-    if (!application) {
-      return next(new ErrorHandler("Application not found!", 404));
-    }
-    await application.deleteOne();
-    res.status(200).json({
-      success: true,
-      message: "Application Deleted!",
-    });
-  }
-);

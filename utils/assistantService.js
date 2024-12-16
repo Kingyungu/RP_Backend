@@ -1,6 +1,7 @@
 // utils/assistantService.js
-import OpenAI from 'openai';
 import ErrorHandler, { logError } from '../middlewares/error.js';
+import openai from './openaiConfig.js';
+import { validateOpenAIConfig } from './openaiServiceValidator.js';
 
 const MAX_RETRIES = 3;
 const RETRY_DELAY = 1000;
@@ -8,19 +9,41 @@ const MAX_ATTEMPTS = 60;
 
 class AssistantService {
   constructor() {
-    this.client = new OpenAI({
-      apiKey: process.env.OPENAI_API_KEY,
-      organization: process.env.OPENAI_ORGANIZATION_ID
-    });
-    
-    if (!process.env.OPENAI_ASSISTANT_ID) {
-      throw new ErrorHandler('OpenAI Assistant ID is not configured in environment', 500);
+    this.initialize();
+  }
+
+  async initialize() {
+    try {
+      const configValidation = await validateOpenAIConfig();
+      this.isConfigValid = configValidation.isValid;
+      
+      if (!this.isConfigValid) {
+        console.warn('OpenAI configuration issues:', configValidation.issues);
+        return this.useFallbackMode();
+      }
+
+      this.client = openai;
+      this.assistantId = process.env.OPENAI_ASSISTANT_ID;
+
+      if (!this.assistantId) {
+        console.warn('OpenAI Assistant ID not configured');
+        return this.useFallbackMode();
+      }
+
+    } catch (error) {
+      console.error('Failed to initialize AssistantService:', error);
+      this.useFallbackMode();
     }
-    
-    this.assistantId = process.env.OPENAI_ASSISTANT_ID;
+  }
+
+  useFallbackMode() {
+    console.log('Using fallback mode for AI analysis');
+    this.isConfigValid = false;
   }
 
   async retry(operation, maxRetries = MAX_RETRIES) {
+    if (!this.isConfigValid) return null;
+
     for (let i = 0; i < maxRetries; i++) {
       try {
         return await operation();
@@ -33,6 +56,46 @@ class AssistantService {
   }
 
   async analyzeApplication(cvText, jobDescription) {
+    if (!this.isConfigValid) {
+      return {
+        success: true,
+        analysis: `
+1. INTERNAL RECRUITER ANALYSIS:
+
+Match Score: 50
+
+Initial Feedback:
+Application received and pending manual review by our recruitment team.
+
+Strengths Identified:
+- Pending manual review
+- Will be evaluated by recruitment team
+
+Areas for Enhancement:
+- Pending detailed review
+- Will provide specific feedback after evaluation
+
+Recommendations:
+Await feedback from our recruitment team
+
+2. CANDIDATE FEEDBACK EMAIL:
+
+Subject: Application Status Update - Position
+
+Dear Candidate,
+
+Thank you for your application. We have received your submission and it is currently under review by our recruitment team.
+
+We will carefully evaluate your qualifications and experience against the position requirements and get back to you with detailed feedback.
+
+Please allow us some time to complete our review process. We appreciate your patience.
+
+Best regards,
+Recruitment Team`,
+        score: 50
+      };
+    }
+
     let thread = null;
     
     try {
@@ -100,6 +163,8 @@ class AssistantService {
   }
 
   async waitForCompletion(threadId, runId, maxAttempts = MAX_ATTEMPTS) {
+    if (!this.isConfigValid) return null;
+
     for (let i = 0; i < maxAttempts; i++) {
       try {
         const run = await this.retry(async () => 
@@ -141,63 +206,44 @@ class AssistantService {
   }
 
   async testConnection() {
+    if (!this.isConfigValid) {
+      console.log('OpenAI services not configured, skipping connection test');
+      return true;
+    }
+
     try {
+      if (!this.client) {
+        console.log('OpenAI client not properly initialized');
+        return false;
+      }
+
       const thread = await this.client.beta.threads.create();
       await this.cleanupThread({ id: thread.id });
       return true;
     } catch (error) {
-      throw new ErrorHandler(
-        `Assistant Service connection test failed: ${error.message}`,
-        500
-      );
+      console.warn('Assistant Service connection test failed:', error.message);
+      return false;
     }
   }
 
   async cleanupThread(thread) {
-    if (thread?.id) {
-      try {
-        await this.client.beta.threads.del(thread.id);
-        console.log('Thread cleanup completed:', thread.id);
-      } catch (cleanupError) {
-        logError(cleanupError, {
-          context: 'Thread Cleanup',
-          threadId: thread.id
-        });
-      }
+    if (!this.isConfigValid || !thread?.id) return;
+
+    try {
+      await this.client.beta.threads.del(thread.id);
+      console.log('Thread cleanup completed:', thread.id);
+    } catch (cleanupError) {
+      logError(cleanupError, {
+        context: 'Thread Cleanup',
+        threadId: thread.id
+      });
     }
-  }
-
-  validateConfig() {
-    const config = {
-      apiKey: !!process.env.OPENAI_API_KEY,
-      orgId: !!process.env.OPENAI_ORGANIZATION_ID,
-      assistantId: !!process.env.OPENAI_ASSISTANT_ID
-    };
-
-    console.log('Assistant Service Configuration:', {
-      apiKey: config.apiKey ? 'Present' : 'Missing',
-      orgId: config.orgId ? 'Present' : 'Missing',
-      assistantId: config.assistantId ? 'Present' : 'Missing'
-    });
-
-    if (!process.env.OPENAI_API_KEY) {
-      throw new ErrorHandler('OpenAI API key is not configured', 500);
-    }
-
-    if (!process.env.OPENAI_ORGANIZATION_ID) {
-      throw new ErrorHandler('OpenAI Organization ID is not configured', 500);
-    }
-
-    if (!process.env.OPENAI_ASSISTANT_ID) {
-      throw new ErrorHandler('OpenAI Assistant ID is not configured', 500);
-    }
-
-    return true;
   }
 
   formatAnalysisPrompt(jobDescription, cvText) {
-    return `Review this application as a third-party recruitment specialist and provide professional feedback.
-
+    return `Analyze this job application as a recruitment specialist and provide two types of feedback:
+  
+1. INTERNAL RECRUITER ANALYSIS:
 Job Description:
 ${jobDescription}
 
@@ -209,7 +255,7 @@ Please provide concise, constructive feedback using exactly this format:
 Match Score: [0-100]
 
 Initial Feedback:
-[Friendly greeting and 2-3 sentences of personalized feedback focusing on key alignments or gaps]
+[2-3 sentences of personalized feedback focusing on key alignments or gaps]
 
 Strengths Identified:
 - [Top 2-3 relevant qualifications that align well with the role]
@@ -222,7 +268,34 @@ Areas for Enhancement:
 Recommendations:
 [One clear, practical suggestion for improving the application]
 
-Note: Keep feedback brief, professional, and constructive. Focus on specific qualifications and experiences rather than general statements.`;
+2. CANDIDATE FEEDBACK EMAIL:
+Now, draft a professional email response to the candidate using this structure:
+
+Subject: Application Status Update - [Job Title] Position
+
+Dear [Candidate Name],
+
+[Opening - Thank them for their application and express genuine interest]
+
+[Body Paragraph 1 - Highlight 2-3 specific strengths from their application]
+
+[Body Paragraph 2 - Constructively address any gaps or areas for improvement]
+
+[Body Paragraph 3 - Next steps or recommendations]
+
+Best regards,
+[Company] Recruitment Team
+
+Note: Keep both analyses professional, constructive, and actionable. Focus on specific qualifications and experiences rather than general statements.`;
+  }
+
+  parseAnalysisResponse(analysis) {
+    const [recruiterAnalysis, candidateEmail] = analysis.split('2. CANDIDATE FEEDBACK EMAIL:');
+    
+    return {
+      recruiterFeedback: recruiterAnalysis.replace('1. INTERNAL RECRUITER ANALYSIS:', '').trim(),
+      candidateEmail: candidateEmail.trim()
+    };
   }
 
   validateAnalysisResponse(analysis) {

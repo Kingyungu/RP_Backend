@@ -18,36 +18,32 @@ import helmet from 'helmet';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-// Initialize express app
 const app = express();
 
+// CORS configuration - must be before other middleware
+app.use(cors({
+  origin: true, // Allow requests from any origin
+  credentials: true,
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'Cookie'],
+  exposedHeaders: ['set-cookie']
+}));
+
+// Options pre-flight request handling
+app.options('*', cors());
+
 // Security headers
-app.use(helmet());
+app.use(helmet({
+  crossOriginResourcePolicy: false,
+  crossOriginEmbedderPolicy: false
+}));
 
 // Rate limiting
 const limiter = rateLimit({
-  windowMs: 15 * 60 * 1000, // 15 minutes
-  max: 100 // limit each IP to 100 requests per windowMs
+  windowMs: 15 * 60 * 1000,
+  max: 100
 });
 app.use('/api/', limiter);
-
-// CORS configuration
-const corsOptions = {
-  origin: process.env.FRONTEND_URL,
-  credentials: true,
-  methods: ["GET", "POST", "DELETE", "PUT"],
-  exposedHeaders: ['Content-Disposition', 'Content-Length', 'Content-Type'],
-  allowedHeaders: ['Content-Type', 'Authorization']
-};
-app.use(cors(corsOptions));
-
-// Security headers
-app.use((req, res, next) => {
-  res.header('Cross-Origin-Embedder-Policy', 'require-corp');
-  res.header('Cross-Origin-Opener-Policy', 'same-origin');
-  res.setHeader('Content-Security-Policy', `frame-ancestors ${process.env.FRONTEND_URL}`);
-  next();
-});
 
 // Body parsing
 app.use(express.json({ limit: '10mb' }));
@@ -62,7 +58,7 @@ app.use(
     debug: process.env.NODE_ENV === 'development',
     createParentPath: true,
     preserveExtension: true,
-    limits: { fileSize: 5 * 1024 * 1024 }, // 5MB limit
+    limits: { fileSize: 5 * 1024 * 1024 },
     abortOnLimit: true
   })
 );

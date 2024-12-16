@@ -75,6 +75,18 @@ const applicationSchema = new mongoose.Schema({
     type: String,
     required: false
   },
+  candidateEmail: {
+    type: String,
+    required: false
+  },
+  emailSent: {
+    type: Boolean,
+    default: false
+  },
+  sentEmail: {
+    type: String,
+    required: false
+  },
   matchScore: {
     type: Number,
     required: true,
@@ -125,5 +137,10 @@ const applicationSchema = new mongoose.Schema({
     }
   }
 });
-
+applicationSchema.index({ "employerID.user": 1 });
+applicationSchema.index({ "applicantID.user": 1 });
+applicationSchema.index({ jobId: 1 });
+applicationSchema.index({ createdAt: -1 });
+applicationSchema.index({ matchScore: -1 });
+applicationSchema.index({ "resume.public_id": 1 });
 export const Application = mongoose.model("Application", applicationSchema);
