@@ -47,6 +47,12 @@ const applicationSchema = new mongoose.Schema({
       default: Date.now
     }
   },
+  jobId: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'Job',
+    required: true,
+    index: true  // Keep the index
+  },
   applicantID: {
     user: {
       type: mongoose.Schema.Types.ObjectId,

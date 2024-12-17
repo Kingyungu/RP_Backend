@@ -290,14 +290,42 @@ Note: Keep both analyses professional, constructive, and actionable. Focus on sp
   }
 
   parseAnalysisResponse(analysis) {
-    const [recruiterAnalysis, candidateEmail] = analysis.split('2. CANDIDATE FEEDBACK EMAIL:');
-    
-    return {
-      recruiterFeedback: recruiterAnalysis.replace('1. INTERNAL RECRUITER ANALYSIS:', '').trim(),
-      candidateEmail: candidateEmail.trim()
-    };
+    try {
+      // Handle undefined or null analysis
+      if (!analysis) {
+        console.error('Analysis is null or undefined');
+        return {
+          recruiterFeedback: '',
+          candidateEmail: ''
+        };
+      }
+  
+      // Split on exact header match
+      const parts = analysis.split(/2\.\s*CANDIDATE FEEDBACK EMAIL:/i);
+      
+      if (parts.length !== 2) {
+        console.warn('Analysis format invalid, could not split into two parts:', analysis);
+        // Return the whole analysis as recruiter feedback if we can't split it
+        return {
+          recruiterFeedback: analysis.replace(/1\.\s*INTERNAL RECRUITER ANALYSIS:/i, '').trim(),
+          candidateEmail: ''
+        };
+      }
+  
+      const [recruiterPart, emailPart] = parts;
+  
+      return {
+        recruiterFeedback: recruiterPart.replace(/1\.\s*INTERNAL RECRUITER ANALYSIS:/i, '').trim(),
+        candidateEmail: emailPart.trim()
+      };
+    } catch (error) {
+      console.error('Error parsing analysis response:', error);
+      return {
+        recruiterFeedback: analysis || '',
+        candidateEmail: ''
+      };
+    }
   }
-
   validateAnalysisResponse(analysis) {
     const requiredSections = [
       { name: 'Match Score', pattern: /Match Score:\s*\d+/ },

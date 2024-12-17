@@ -199,36 +199,85 @@ export const sendFeedbackEmail = catchAsyncErrors(async (req, res, next) => {
 export const regenerateFeedback = catchAsyncErrors(async (req, res, next) => {
   const { applicationId } = req.params;
 
-  const application = await Application.findById(applicationId);
-  if (!application) {
-    return next(new ErrorHandler("Application not found!", 404));
-  }
-
-  const job = await Job.findById(application.jobId);
-  if (!job) {
-    return next(new ErrorHandler("Job not found!", 404));
-  }
-
   try {
-    const aiAnalysisResult = await analyzeWithOpenAI(application.coverLetter, job.description);
-    
-    application.analysis = aiAnalysisResult.recruiterAnalysis;
-    application.candidateEmail = aiAnalysisResult.candidateEmail;
-    application.matchScore = aiAnalysisResult.score;
-    application.emailSent = false;
-    
-    await application.save();
+    // Find the application
+    const application = await Application.findById(applicationId);
+    if (!application) {
+      return next(new ErrorHandler("Application not found!", 404));
+    }
 
-    res.status(200).json({
-      success: true,
-      message: "Feedback regenerated successfully",
-      analysis: aiAnalysisResult
+    console.log('Found application:', {
+      id: application._id,
+      employerId: application.employerID.user
     });
+
+    // Find the most recently posted job by this employer
+    const job = await Job.findOne({
+      postedBy: application.employerID.user,
+      expired: false
+    }).sort({ createdAt: -1 });
+
+    console.log('Job search result:', {
+      found: !!job,
+      jobId: job?._id
+    });
+
+    if (!job) {
+      return next(new ErrorHandler("No active job posting found for this employer", 404));
+    }
+
+    // Get new AI analysis with error handling
+    try {
+      const aiAnalysisResult = await analyzeWithOpenAI(
+        application.coverLetter, 
+        job.description
+      );
+      
+      if (!aiAnalysisResult.success) {
+        return next(new ErrorHandler("Failed to generate new analysis", 500));
+      }
+
+      // Update application with fallback values if parsing fails
+      const updates = {
+        analysis: aiAnalysisResult.recruiterAnalysis || aiAnalysisResult.analysis,
+        candidateEmail: aiAnalysisResult.candidateEmail || '',
+        matchScore: aiAnalysisResult.score || 0,
+        emailSent: false
+      };
+
+      // Update the application atomically
+      const updatedApplication = await Application.findByIdAndUpdate(
+        applicationId,
+        { $set: updates },
+        { 
+          new: true,
+          runValidators: true
+        }
+      );
+
+      if (!updatedApplication) {
+        return next(new ErrorHandler("Failed to update application", 500));
+      }
+
+      res.status(200).json({
+        success: true,
+        message: "Feedback regenerated successfully",
+        analysis: {
+          recruiterAnalysis: updates.analysis,
+          candidateEmail: updates.candidateEmail,
+          score: updates.matchScore
+        }
+      });
+    } catch (analysisError) {
+      console.error('Error during analysis:', analysisError);
+      return next(new ErrorHandler("Failed to analyze application", 500));
+    }
+
   } catch (error) {
-    next(new ErrorHandler("Failed to regenerate feedback", 500));
+    console.error('Error in regenerateFeedback:', error);
+    return next(new ErrorHandler(error.message || "Failed to regenerate feedback", 500));
   }
 });
-
 export const employerGetAllApplications = catchAsyncErrors(async (req, res, next) => {
   const { role } = req.user;
   if (role === "Job Seeker") {
@@ -366,6 +415,8 @@ const extractSkills = (text) => {
 
   return skills;
 };
+
+
 
 const identifyStrengths = (text) => {
   const strengths = [];
