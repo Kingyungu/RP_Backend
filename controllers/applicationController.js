@@ -3,7 +3,7 @@ import { Job } from "../models/jobSchema.js";
 import { catchAsyncErrors } from "../middlewares/catchAsyncError.js";
 import ErrorHandler from "../middlewares/error.js";
 import { uploadToGridFS, getFileFromGridFS } from "../utils/gridfsStorage.js";
-import assistantService from '../utils/assistantService.js';
+import assistantService from "../utils/assistantService.js";
 
 const analyzeWithOpenAI = async (cvText, jobDescription) => {
   try {
@@ -16,46 +16,66 @@ const analyzeWithOpenAI = async (cvText, jobDescription) => {
       throw new ErrorHandler(result.error || 'Analysis failed', 500);
     }
 
-    // Parse both types of feedback
-    const { recruiterFeedback, candidateEmail } = assistantService.parseAnalysisResponse(result.analysis);
+    // Parse out just the recruiter section for the analysis field
+    const recruiterSection = result.analysis.split(/2\.\s*CANDIDATE FEEDBACK EMAIL:|---/i)[0]
+      .replace(/1\.\s*INTERNAL RECRUITER ANALYSIS:/i, '')
+      .trim();
 
+    // Return with separated content
     return {
       success: true,
-      recruiterAnalysis: recruiterFeedback,
-      candidateEmail: candidateEmail,
+      recruiterAnalysis: recruiterSection,    // Only recruiter section
+      candidateEmail: result.candidateEmail,  // Only candidate email
       score: result.score
     };
   } catch (error) {
+    console.error('Error during analysis:', error);
     throw error;
   }
 };
-
 export const postApplication = catchAsyncErrors(async (req, res, next) => {
   try {
+    // Role validation
     const { role } = req.user;
     if (role === "Employer") {
-      return next(new ErrorHandler("Employer not allowed to access this resource.", 400));
+      return next(
+        new ErrorHandler("Employer not allowed to access this resource.", 400)
+      );
     }
 
+    // File validation
     if (!req.files || Object.keys(req.files).length === 0) {
       return next(new ErrorHandler("Resume File Required!", 400));
     }
 
     const { resume } = req.files;
-    const allowedFormats = ["application/pdf", "image/png", "image/jpeg", "image/webp"];
+    const allowedFormats = [
+      "application/pdf",
+      "image/png",
+      "image/jpeg",
+      "image/webp",
+    ];
     if (!allowedFormats.includes(resume.mimetype)) {
-      return next(new ErrorHandler("Invalid file type. Please upload a PDF, PNG, JPEG, or WEBP file.", 400));
+      return next(
+        new ErrorHandler(
+          "Invalid file type. Please upload a PDF, PNG, JPEG, or WEBP file.",
+          400
+        )
+      );
     }
 
+    // Upload file
     const uploadedFile = await uploadToGridFS(resume);
 
+    // Extract request data
     const { name, email, coverLetter, phone, address, jobId } = req.body;
-    
+
     const applicantID = {
       user: req.user._id,
       role: "Job Seeker",
     };
 
+    // Job validation
     if (!jobId) {
       return next(new ErrorHandler("Job not found!", 404));
     }
@@ -66,19 +86,53 @@ export const postApplication = catchAsyncErrors(async (req, res, next) => {
     }
 
     // Get OpenAI analysis
-    const aiAnalysisResult = await analyzeWithOpenAI(coverLetter, jobDetails.description);
-    console.log('AI Analysis Result:', aiAnalysisResult);
+    let aiAnalysisResult;
+    try {
+      aiAnalysisResult = await analyzeWithOpenAI(
+        coverLetter,
+        jobDetails.description
+      );
+      console.log("AI Analysis Result:", aiAnalysisResult);
+
+      if (!aiAnalysisResult.success) {
+        console.warn("AI analysis unsuccessful, using fallback");
+        aiAnalysisResult = {
+          recruiterAnalysis: "Analysis pending manual review.",
+          candidateEmail: "Thank you for your application. It is currently under review.",
+          score: 0
+        };
+      }
+    } catch (analysisError) {
+      console.error("AI analysis failed:", analysisError);
+      aiAnalysisResult = {
+        recruiterAnalysis: "Analysis failed - manual review required.",
+        candidateEmail: "Thank you for your application. Our team will review it shortly.",
+        score: 0
+      };
+    }
 
     const employerID = {
       user: jobDetails.postedBy,
       role: "Employer",
     };
 
-    if (!name || !email || !coverLetter || !phone || !address || !applicantID || !employerID || !resume) {
+    // Field validation
+    if (
+      !name ||
+      !email ||
+      !coverLetter ||
+      !phone ||
+      !address ||
+      !applicantID ||
+      !employerID ||
+      !resume
+    ) {
       return next(new ErrorHandler("Please fill all fields.", 400));
     }
 
+    // Create application
     const application = await Application.create({
+      // Basic info
       name,
       email,
       coverLetter,
@@ -86,37 +140,44 @@ export const postApplication = catchAsyncErrors(async (req, res, next) => {
       address,
       applicantID,
       employerID,
+
+      // Resume info
       resume: {
         public_id: uploadedFile.fileId,
         url: `/api/v1/application/resume/${uploadedFile.fileId}`,
         contentType: resume.mimetype,
         originalName: resume.name,
-        size: resume.size
+        size: resume.size,
       },
-      analysis: aiAnalysisResult.recruiterAnalysis,
-      candidateEmail: aiAnalysisResult.candidateEmail,
+
+      // AI Analysis results - stored separately
+      analysis: aiAnalysisResult.recruiterAnalysis,     // For recruiter view
+      candidateEmail: aiAnalysisResult.candidateEmail,  // For candidate feedback
       emailSent: false,
       matchScore: aiAnalysisResult.score,
       jobId: jobDetails._id,
+
+      // Text analysis
       textAnalysis: {
         coverLetterAnalysis: {
-          sentiment: 'Neutral',
+          sentiment: "Neutral",
           keyPoints: analyzeCoverLetter(coverLetter),
-          professionalTone: calculateProfessionalTone(coverLetter)
+          professionalTone: calculateProfessionalTone(coverLetter),
         },
         resumeAnalysis: {
           experience: [],
           skills: extractSkills(coverLetter),
-          education: []
+          education: [],
         },
         overallAnalysis: {
           strengths: identifyStrengths(coverLetter),
           improvements: [],
-          recommendations: generateRecommendations()
-        }
-      }
+          recommendations: generateRecommendations(),
+        },
+      },
     });
 
+    // Send response
     res.status(200).json({
       success: true,
       message: "Application Submitted!",
@@ -127,46 +188,49 @@ export const postApplication = catchAsyncErrors(async (req, res, next) => {
     next(new ErrorHandler(error.message, 500));
   }
 });
-
 export const getResume = catchAsyncErrors(async (req, res, next) => {
   try {
     const { fileId } = req.params;
-    
+
     const { buffer, metadata, contentType } = await getFileFromGridFS(fileId);
-    
+
     if (!buffer || !metadata) {
       return next(new ErrorHandler("Resume not found", 404));
     }
 
-    const application = await Application.findOne({ "resume.public_id": fileId });
+    const application = await Application.findOne({
+      "resume.public_id": fileId,
+    });
     if (!application) {
       return next(new ErrorHandler("Application not found", 404));
     }
 
-    const finalContentType = contentType || application.resume.contentType || 'application/pdf';
-    
-    res.setHeader('Content-Type', finalContentType);
+    const finalContentType =
+      contentType || application.resume.contentType || "application/pdf";
+
+    res.setHeader("Content-Type", finalContentType);
     res.setHeader(
-      'Content-Disposition', 
-      `inline; filename="${metadata.metadata?.originalName || application.resume.originalName || 'resume.pdf'}"`
+      "Content-Disposition",
+      `inline; filename="${metadata.metadata?.originalName || application.resume.originalName || "resume.pdf"}"`
     );
-    res.setHeader('Content-Length', buffer.length);
-    
-    console.log('Resume retrieved:', {
+    res.setHeader("Content-Length", buffer.length);
+
+    console.log("Resume retrieved:", {
       fileId,
       contentType: finalContentType,
       size: buffer.length,
-      filename: metadata.metadata?.originalName || application.resume.originalName
+      filename:
+        metadata.metadata?.originalName || application.resume.originalName,
     });
 
     res.send(buffer);
   } catch (error) {
     console.error("Error in getResume:", error);
-    
-    if (error.code === 'ERR_HTTP_INVALID_HEADER_VALUE') {
+
+    if (error.code === "ERR_HTTP_INVALID_HEADER_VALUE") {
       return next(new ErrorHandler("Invalid file metadata", 500));
     }
-    
+
     next(new ErrorHandler("Error retrieving resume", 500));
   }
 });
@@ -189,7 +253,7 @@ export const sendFeedbackEmail = catchAsyncErrors(async (req, res, next) => {
 
     res.status(200).json({
       success: true,
-      message: "Feedback email sent successfully"
+      message: "Feedback email sent successfully",
     });
   } catch (error) {
     next(new ErrorHandler("Failed to send feedback email", 500));
@@ -208,51 +272,57 @@ export const regenerateFeedback = catchAsyncErrors(async (req, res, next) => {
 
     console.log('Found application:', {
       id: application._id,
-      employerId: application.employerID.user
+      employerId: application.employerID.user,
+      jobId: application.jobId
     });
 
-    // Find the most recently posted job by this employer
-    const job = await Job.findOne({
-      postedBy: application.employerID.user,
-      expired: false
-    }).sort({ createdAt: -1 });
-
-    console.log('Job search result:', {
-      found: !!job,
-      jobId: job?._id
+    // Find job - using let so we can reassign
+    let jobForAnalysis = await Job.findById(application.jobId);
+    console.log('Job lookup result:', {
+      searchId: application.jobId,
+      found: !!jobForAnalysis
     });
 
-    if (!job) {
-      return next(new ErrorHandler("No active job posting found for this employer", 404));
+    if (!jobForAnalysis) {
+      // If original job not found, try to find the latest active job
+      jobForAnalysis = await Job.findOne({
+        postedBy: application.employerID.user,
+        expired: false
+      }).sort({ jobPostedOn: -1 });
+
+      if (!jobForAnalysis) {
+        return next(new ErrorHandler("No active jobs found for analysis", 404));
+      }
+
+      console.log('Using latest job for analysis:', {
+        jobId: jobForAnalysis._id,
+        title: jobForAnalysis.title
+      });
     }
 
-    // Get new AI analysis with error handling
+    // Get new AI analysis
     try {
       const aiAnalysisResult = await analyzeWithOpenAI(
         application.coverLetter, 
-        job.description
+        jobForAnalysis.description
       );
       
       if (!aiAnalysisResult.success) {
         return next(new ErrorHandler("Failed to generate new analysis", 500));
       }
 
-      // Update application with fallback values if parsing fails
+      // Update application with new analysis
       const updates = {
-        analysis: aiAnalysisResult.recruiterAnalysis || aiAnalysisResult.analysis,
-        candidateEmail: aiAnalysisResult.candidateEmail || '',
-        matchScore: aiAnalysisResult.score || 0,
+        analysis: aiAnalysisResult.recruiterAnalysis,
+        candidateEmail: aiAnalysisResult.candidateEmail,
+        matchScore: aiAnalysisResult.score,
         emailSent: false
       };
 
-      // Update the application atomically
       const updatedApplication = await Application.findByIdAndUpdate(
         applicationId,
         { $set: updates },
-        { 
-          new: true,
-          runValidators: true
-        }
+        { new: true }
       );
 
       if (!updatedApplication) {
@@ -263,99 +333,127 @@ export const regenerateFeedback = catchAsyncErrors(async (req, res, next) => {
         success: true,
         message: "Feedback regenerated successfully",
         analysis: {
-          recruiterAnalysis: updates.analysis,
-          candidateEmail: updates.candidateEmail,
-          score: updates.matchScore
+          recruiterAnalysis: aiAnalysisResult.recruiterAnalysis,
+          candidateEmail: aiAnalysisResult.candidateEmail,
+          score: aiAnalysisResult.score
         }
       });
+
     } catch (analysisError) {
       console.error('Error during analysis:', analysisError);
       return next(new ErrorHandler("Failed to analyze application", 500));
     }
 
   } catch (error) {
-    console.error('Error in regenerateFeedback:', error);
+    console.error('Error in regenerateFeedback:', {
+      error,
+      applicationId,
+      message: error.message
+    });
     return next(new ErrorHandler(error.message || "Failed to regenerate feedback", 500));
   }
 });
-export const employerGetAllApplications = catchAsyncErrors(async (req, res, next) => {
-  const { role } = req.user;
-  if (role === "Job Seeker") {
-    return next(new ErrorHandler("Job Seeker not allowed to access this resource.", 400));
+export const employerGetAllApplications = catchAsyncErrors(
+  async (req, res, next) => {
+    const { role } = req.user;
+    if (role === "Job Seeker") {
+      return next(
+        new ErrorHandler("Job Seeker not allowed to access this resource.", 400)
+      );
+    }
+    // Add pagination
+    const page = parseInt(req.query.page) || 1;
+    const limit = parseInt(req.query.limit) || 10;
+    const skip = (page - 1) * limit;
+
+    // Get total count for pagination
+    const totalCount = await Application.countDocuments({
+      "employerID.user": req.user._id,
+    });
+
+    // Add field selection and pagination
+    const applications = await Application.find({
+      "employerID.user": req.user._id,
+    })
+      .select(
+        "name email phone address coverLetter resume analysis matchScore createdAt"
+      )
+      .sort({ createdAt: -1 })
+      .skip(skip)
+      .limit(limit)
+      .lean(); // Convert to plain JS object for better performance
+
+    res.status(200).json({
+      success: true,
+      applications,
+      currentPage: page,
+      totalPages: Math.ceil(totalCount / limit),
+      totalApplications: totalCount,
+    });
   }
-  // Add pagination
-  const page = parseInt(req.query.page) || 1;
-  const limit = parseInt(req.query.limit) || 10;
-  const skip = (page - 1) * limit;
+);
 
-  // Get total count for pagination
-  const totalCount = await Application.countDocuments({ "employerID.user": req.user._id });
+export const jobseekerGetAllApplications = catchAsyncErrors(
+  async (req, res, next) => {
+    const { role } = req.user;
+    if (role === "Employer") {
+      return next(
+        new ErrorHandler("Employer not allowed to access this resource.", 400)
+      );
+    }
 
-  // Add field selection and pagination
-  const applications = await Application.find({ "employerID.user": req.user._id })
-    .select('name email phone address coverLetter resume analysis matchScore createdAt')
-    .sort({ createdAt: -1 })
-    .skip(skip)
-    .limit(limit)
-    .lean(); // Convert to plain JS object for better performance
+    // Add pagination
+    const page = parseInt(req.query.page) || 1;
+    const limit = parseInt(req.query.limit) || 10;
+    const skip = (page - 1) * limit;
 
-  res.status(200).json({
-    success: true,
-    applications,
-    currentPage: page,
-    totalPages: Math.ceil(totalCount / limit),
-    totalApplications: totalCount
-  });
-});
+    // Get total count for pagination
+    const totalCount = await Application.countDocuments({
+      "applicantID.user": req.user._id,
+    });
 
+    // Add field selection and pagination
+    const applications = await Application.find({
+      "applicantID.user": req.user._id,
+    })
+      .select(
+        "name email coverLetter resume analysis matchScore jobId createdAt"
+      )
+      .sort({ createdAt: -1 })
+      .skip(skip)
+      .limit(limit)
+      .lean();
 
-export const jobseekerGetAllApplications = catchAsyncErrors(async (req, res, next) => {
-  const { role } = req.user;
-  if (role === "Employer") {
-    return next(new ErrorHandler("Employer not allowed to access this resource.", 400));
+    res.status(200).json({
+      success: true,
+      applications,
+      currentPage: page,
+      totalPages: Math.ceil(totalCount / limit),
+      totalApplications: totalCount,
+    });
   }
+);
 
-  // Add pagination
-  const page = parseInt(req.query.page) || 1;
-  const limit = parseInt(req.query.limit) || 10;
-  const skip = (page - 1) * limit;
-
-  // Get total count for pagination
-  const totalCount = await Application.countDocuments({ "applicantID.user": req.user._id });
-
-  // Add field selection and pagination
-  const applications = await Application.find({ "applicantID.user": req.user._id })
-    .select('name email coverLetter resume analysis matchScore jobId createdAt')
-    .sort({ createdAt: -1 })
-    .skip(skip)
-    .limit(limit)
-    .lean();
-
-  res.status(200).json({
-    success: true,
-    applications,
-    currentPage: page,
-    totalPages: Math.ceil(totalCount / limit),
-    totalApplications: totalCount
-  });
-});
-
-export const jobseekerDeleteApplication = catchAsyncErrors(async (req, res, next) => {
-  const { role } = req.user;
-  if (role === "Employer") {
-    return next(new ErrorHandler("Employer not allowed to access this resource.", 400));
+export const jobseekerDeleteApplication = catchAsyncErrors(
+  async (req, res, next) => {
+    const { role } = req.user;
+    if (role === "Employer") {
+      return next(
+        new ErrorHandler("Employer not allowed to access this resource.", 400)
+      );
+    }
+    const { id } = req.params;
+    const application = await Application.findById(id);
+    if (!application) {
+      return next(new ErrorHandler("Application not found!", 404));
+    }
+    await application.deleteOne();
+    res.status(200).json({
+      success: true,
+      message: "Application Deleted!",
+    });
   }
-  const { id } = req.params;
-  const application = await Application.findById(id);
-  if (!application) {
-    return next(new ErrorHandler("Application not found!", 404));
-  }
-  await application.deleteOne();
-  res.status(200).json({
-    success: true,
-    message: "Application Deleted!",
-  });
-});
+);
 
 // Helper functions for text analysis
 const analyzeCoverLetter = (coverLetter) => {
@@ -416,8 +514,6 @@ const extractSkills = (text) => {
   return skills;
 };
 
-
-
 const identifyStrengths = (text) => {
   const strengths = [];
   const strengthIndicators = {
@@ -451,5 +547,5 @@ export default {
   regenerateFeedback,
   employerGetAllApplications,
   jobseekerGetAllApplications,
-  jobseekerDeleteApplication
+  jobseekerDeleteApplication,
 };

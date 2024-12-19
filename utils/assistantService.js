@@ -1,7 +1,6 @@
-// utils/assistantService.js
-import ErrorHandler, { logError } from '../middlewares/error.js';
-import openai from './openaiConfig.js';
-import { validateOpenAIConfig } from './openaiServiceValidator.js';
+import ErrorHandler, { logError } from "../middlewares/error.js";
+import openai from "./openaiConfig.js";
+import { validateOpenAIConfig } from "./openaiServiceValidator.js";
 
 const MAX_RETRIES = 3;
 const RETRY_DELAY = 1000;
@@ -16,9 +15,9 @@ class AssistantService {
     try {
       const configValidation = await validateOpenAIConfig();
       this.isConfigValid = configValidation.isValid;
-      
+
       if (!this.isConfigValid) {
-        console.warn('OpenAI configuration issues:', configValidation.issues);
+        console.warn("OpenAI configuration issues:", configValidation.issues);
         return this.useFallbackMode();
       }
 
@@ -26,359 +25,440 @@ class AssistantService {
       this.assistantId = process.env.OPENAI_ASSISTANT_ID;
 
       if (!this.assistantId) {
-        console.warn('OpenAI Assistant ID not configured');
+        console.warn("OpenAI Assistant ID not configured");
         return this.useFallbackMode();
       }
-
     } catch (error) {
-      console.error('Failed to initialize AssistantService:', error);
+      console.error("Failed to initialize AssistantService:", error);
       this.useFallbackMode();
     }
   }
 
   useFallbackMode() {
-    console.log('Using fallback mode for AI analysis');
+    console.log("Using fallback mode for AI analysis");
     this.isConfigValid = false;
   }
 
-  async retry(operation, maxRetries = MAX_RETRIES) {
-    if (!this.isConfigValid) return null;
-
-    for (let i = 0; i < maxRetries; i++) {
-      try {
-        return await operation();
-      } catch (error) {
-        if (i === maxRetries - 1) throw error;
-        await new Promise(resolve => setTimeout(resolve, RETRY_DELAY * (i + 1)));
-        console.log(`Retry attempt ${i + 1}/${maxRetries}`);
+  async testConnection() {
+    try {
+      if (!this.isConfigValid) {
+        console.log("OpenAI services not configured, skipping connection test");
+        return true;
       }
+
+      if (!this.client) {
+        console.warn("OpenAI client not properly initialized");
+        return false;
+      }
+
+      console.log("Testing thread creation...");
+      const thread = await this.retry(async () => {
+        return await this.client.beta.threads.create();
+      });
+
+      if (!thread?.id) {
+        console.warn("Failed to create test thread");
+        return false;
+      }
+
+      await this.cleanupThread({ id: thread.id });
+      console.log("Connection test successful");
+      return true;
+    } catch (error) {
+      console.error("Connection test failed:", {
+        message: error.message,
+        name: error.name,
+        status: error.status,
+      });
+      return false;
     }
   }
 
   async analyzeApplication(cvText, jobDescription) {
     if (!this.isConfigValid) {
-      return {
-        success: true,
-        analysis: `
-1. INTERNAL RECRUITER ANALYSIS:
-
-Match Score: 50
-
-Initial Feedback:
-Application received and pending manual review by our recruitment team.
-
-Strengths Identified:
-- Pending manual review
-- Will be evaluated by recruitment team
-
-Areas for Enhancement:
-- Pending detailed review
-- Will provide specific feedback after evaluation
-
-Recommendations:
-Await feedback from our recruitment team
-
-2. CANDIDATE FEEDBACK EMAIL:
-
-Subject: Application Status Update - Position
-
-Dear Candidate,
-
-Thank you for your application. We have received your submission and it is currently under review by our recruitment team.
-
-We will carefully evaluate your qualifications and experience against the position requirements and get back to you with detailed feedback.
-
-Please allow us some time to complete our review process. We appreciate your patience.
-
-Best regards,
-Recruitment Team`,
-        score: 50
-      };
+      const fallback = this.generateFallbackAnalysis();
+      return fallback;
     }
 
     let thread = null;
-    
+
     try {
-      console.log('Starting application analysis...');
-      
-      thread = await this.retry(async () => 
-        await this.client.beta.threads.create()
-      );
-      
-      await this.retry(async () => 
-        await this.client.beta.threads.messages.create(thread.id, {
-          role: "user",
-          content: this.formatAnalysisPrompt(jobDescription, cvText)
-        })
-      );
+      console.log("Starting application analysis...");
+      thread = await this.retry(() => this.client.beta.threads.create());
 
-      const run = await this.retry(async () => 
-        await this.client.beta.threads.runs.create(thread.id, {
-          assistant_id: this.assistantId,
-        })
+      const analysis = await this.generateFullAnalysis(
+        thread.id,
+        cvText,
+        jobDescription
       );
+      const { recruiterFeedback, candidateEmail } =
+        this.parseAnalysisResponse(analysis);
+      const matchScore = this.calculateMatchScore(analysis);
 
-      await this.waitForCompletion(thread.id, run.id);
-      
-      const messages = await this.retry(async () => 
-        await this.client.beta.threads.messages.list(thread.id)
-      );
-      
-      const analysis = messages.data[0].content[0].text.value;
-      const matchScore = this.parseMatchScore(analysis);
-
-      const validationResult = this.validateAnalysisResponse(analysis);
+      const validationResult = this.validateAnalysis(analysis);
       if (!validationResult.isValid) {
-        console.warn('Analysis format validation:', validationResult);
+        console.warn("Analysis validation issues:", validationResult);
       }
-
-      console.log('Analysis completed successfully:', {
-        threadId: thread.id,
-        score: matchScore,
-        analysisLength: analysis.length,
-        validationResult
-      });
 
       return {
         success: true,
         analysis: analysis,
+        recruiterAnalysis: recruiterFeedback,
+        candidateEmail: candidateEmail,
         score: matchScore,
-        validation: validationResult
+        validation: validationResult,
       };
     } catch (error) {
-      logError(error, { 
-        context: 'AI Analysis',
-        threadId: thread?.id
+      logError(error, {
+        context: "AI Analysis",
+        threadId: thread?.id,
       });
-      
+
       return {
         success: false,
         error: error.message,
-        analysis: "We apologize, but we couldn't complete the analysis at this moment. Your application has been submitted and will be reviewed by the hiring team.",
-        score: 0
+        analysis: "Application received. Manual review required.",
+        recruiterAnalysis: "Error during analysis. Please review manually.",
+        candidateEmail:
+          "Thank you for your application. Our team will review it shortly.",
+        score: 0,
       };
     } finally {
       await this.cleanupThread(thread);
     }
   }
 
-  async waitForCompletion(threadId, runId, maxAttempts = MAX_ATTEMPTS) {
-    if (!this.isConfigValid) return null;
+  async generateFullAnalysis(threadId, cvText, jobDescription) {
+    const prompt = this.formatAnalysisPrompt(jobDescription, cvText);
 
-    for (let i = 0; i < maxAttempts; i++) {
-      try {
-        const run = await this.retry(async () => 
-          await this.client.beta.threads.runs.retrieve(threadId, runId)
-        );
-        
-        console.log(`Run status check ${i + 1}/${maxAttempts}:`, run.status);
+    await this.retry(() =>
+      this.client.beta.threads.messages.create(threadId, {
+        role: "user",
+        content: prompt,
+      })
+    );
 
-        switch (run.status) {
-          case 'completed':
-            return run;
-          case 'failed':
-          case 'cancelled':
-          case 'expired':
-            throw new ErrorHandler(
-              `Assistant run ${run.status}: ${run.last_error?.message || 'Unknown error'}`,
-              500
-            );
-          case 'queued':
-          case 'in_progress':
-          case 'requires_action':
-            await new Promise(resolve => setTimeout(resolve, 1000));
-            break;
-          default:
-            throw new ErrorHandler(`Unknown run status: ${run.status}`, 500);
-        }
-      } catch (error) {
-        logError(error, {
-          context: 'Wait For Completion',
-          threadId,
-          runId,
-          attempt: i + 1
-        });
-        throw error;
-      }
-    }
-    
-    throw new ErrorHandler('Assistant analysis timed out', 500);
-  }
+    const run = await this.retry(() =>
+      this.client.beta.threads.runs.create(threadId, {
+        assistant_id: this.assistantId,
+      })
+    );
 
-  async testConnection() {
-    if (!this.isConfigValid) {
-      console.log('OpenAI services not configured, skipping connection test');
-      return true;
-    }
+    await this.waitForCompletion(threadId, run.id);
 
-    try {
-      if (!this.client) {
-        console.log('OpenAI client not properly initialized');
-        return false;
-      }
+    const messages = await this.retry(() =>
+      this.client.beta.threads.messages.list(threadId)
+    );
 
-      const thread = await this.client.beta.threads.create();
-      await this.cleanupThread({ id: thread.id });
-      return true;
-    } catch (error) {
-      console.warn('Assistant Service connection test failed:', error.message);
-      return false;
-    }
-  }
-
-  async cleanupThread(thread) {
-    if (!this.isConfigValid || !thread?.id) return;
-
-    try {
-      await this.client.beta.threads.del(thread.id);
-      console.log('Thread cleanup completed:', thread.id);
-    } catch (cleanupError) {
-      logError(cleanupError, {
-        context: 'Thread Cleanup',
-        threadId: thread.id
-      });
-    }
+    return messages.data[0].content[0].text.value;
   }
 
   formatAnalysisPrompt(jobDescription, cvText) {
-    return `Analyze this job application as a recruitment specialist and provide two types of feedback:
+    return `Analyze this job application and provide two distinct sections of feedback:
   
 1. INTERNAL RECRUITER ANALYSIS:
 Job Description:
 ${jobDescription}
 
-CV/Application Content:
+Application Content:
 ${cvText}
 
-Please provide concise, constructive feedback using exactly this format:
+Provide analysis using this exact format without markdown or special formatting:
 
 Match Score: [0-100]
 
 Initial Feedback:
-[2-3 sentences of personalized feedback focusing on key alignments or gaps]
+[2-3 sentences on key alignments/gaps]
 
 Strengths Identified:
-- [Top 2-3 relevant qualifications that align well with the role]
-- [Include specific examples from the CV where possible]
+- [List 2-3 key qualifying strengths]
+- [With specific examples]
 
 Areas for Enhancement:
-- [2-3 specific qualifications or experiences that could be strengthened]
-- [Focus on constructive, actionable gaps]
+- [List 2-3 improvement areas]
+- [Be specific and actionable]
 
 Recommendations:
-[One clear, practical suggestion for improving the application]
+[One clear improvement suggestion]
+
+---
 
 2. CANDIDATE FEEDBACK EMAIL:
-Now, draft a professional email response to the candidate using this structure:
 
-Subject: Application Status Update - [Job Title] Position
+Subject: Application Status Update
 
 Dear [Candidate Name],
 
-[Opening - Thank them for their application and express genuine interest]
+[Thank you and acknowledgment]
 
-[Body Paragraph 1 - Highlight 2-3 specific strengths from their application]
+[Highlight 2-3 strengths]
 
-[Body Paragraph 2 - Constructively address any gaps or areas for improvement]
+[Constructive feedback on areas for improvement]
 
-[Body Paragraph 3 - Next steps or recommendations]
+[Clear next steps]
 
 Best regards,
-[Company] Recruitment Team
+Recruitment Team
 
-Note: Keep both analyses professional, constructive, and actionable. Focus on specific qualifications and experiences rather than general statements.`;
-  }
+Note: Please provide the response without any markdown formatting or special characters.`;
+}
 
-  parseAnalysisResponse(analysis) {
-    try {
-      // Handle undefined or null analysis
+parseAnalysisResponse(analysis) {
+  try {
       if (!analysis) {
-        console.error('Analysis is null or undefined');
-        return {
-          recruiterFeedback: '',
-          candidateEmail: ''
-        };
+          console.error('Analysis is null or undefined');
+          return {
+              recruiterAnalysis: 'Analysis pending manual review.',
+              candidateEmail: 'Thank you for your application. It is under review.'
+          };
       }
-  
-      // Split on exact header match
-      const parts = analysis.split(/2\.\s*CANDIDATE FEEDBACK EMAIL:/i);
+
+      // Find the separation point between recruiter analysis and candidate email
+      const separators = [
+          '2. CANDIDATE FEEDBACK EMAIL:',
+          'Subject:', 
+          '---'
+      ];
+
+      let splitIndex = -1;
+      let usedSeparator = '';
       
-      if (parts.length !== 2) {
-        console.warn('Analysis format invalid, could not split into two parts:', analysis);
-        // Return the whole analysis as recruiter feedback if we can't split it
-        return {
-          recruiterFeedback: analysis.replace(/1\.\s*INTERNAL RECRUITER ANALYSIS:/i, '').trim(),
-          candidateEmail: ''
-        };
+      for (const separator of separators) {
+          splitIndex = analysis.indexOf(separator);
+          if (splitIndex !== -1) {
+              usedSeparator = separator;
+              break;
+          }
       }
-  
-      const [recruiterPart, emailPart] = parts;
-  
+
+      if (splitIndex === -1) {
+          console.warn('Could not find email section separator');
+          return {
+              recruiterAnalysis: analysis,
+              candidateEmail: 'Thank you for your application. It is under review.'
+          };
+      }
+
+      // Extract the two sections
+      const recruiterPart = analysis.substring(0, splitIndex).trim();
+      const emailPart = analysis.substring(splitIndex + usedSeparator.length).trim();
+
+      // Clean up recruiter analysis
+      const cleanRecruiterAnalysis = recruiterPart
+          .replace(/1\.\s*INTERNAL RECRUITER ANALYSIS:?/i, '')
+          .trim();
+
+      // Clean up candidate email
+      const cleanCandidateEmail = emailPart
+          .replace(/^[\r\n]+/, '') // Remove leading newlines
+          .trim();
+
       return {
-        recruiterFeedback: recruiterPart.replace(/1\.\s*INTERNAL RECRUITER ANALYSIS:/i, '').trim(),
-        candidateEmail: emailPart.trim()
+          recruiterAnalysis: cleanRecruiterAnalysis,
+          candidateEmail: cleanCandidateEmail
       };
-    } catch (error) {
+
+  } catch (error) {
       console.error('Error parsing analysis response:', error);
       return {
-        recruiterFeedback: analysis || '',
-        candidateEmail: ''
+          recruiterAnalysis: 'Error during analysis. Manual review required.',
+          candidateEmail: 'Thank you for your application. Our team will review it shortly.'
       };
+  }
+}
+
+  calculateMatchScore(analysis) {
+    try {
+      const scoreMatch = analysis.match(/Match Score:\s*(\d+)/i);
+      return scoreMatch
+        ? Math.min(100, Math.max(0, parseInt(scoreMatch[1])))
+        : 0;
+    } catch (error) {
+      console.error("Error calculating match score:", error);
+      return 0;
     }
   }
-  validateAnalysisResponse(analysis) {
+
+  validateAnalysis(analysis) {
     const requiredSections = [
-      { name: 'Match Score', pattern: /Match Score:\s*\d+/ },
-      { name: 'Initial Feedback', pattern: /Initial Feedback:[\s\S]+?(?=\n\n|$)/ },
-      { name: 'Strengths Identified', pattern: /Strengths Identified:[\s\S]+?(?=\n\n|$)/ },
-      { name: 'Areas for Enhancement', pattern: /Areas for Enhancement:[\s\S]+?(?=\n\n|$)/ },
-      { name: 'Recommendations', pattern: /Recommendations:[\s\S]+?(?=\n\n|$)/ }
+      { name: "Match Score", pattern: /Match Score:\s*\d+/ },
+      {
+        name: "Initial Feedback",
+        pattern: /Initial Feedback:[\s\S]+?(?=Strengths Identified|$)/,
+      },
+      {
+        name: "Strengths Identified",
+        pattern: /Strengths Identified:[\s\S]+?(?=Areas for Enhancement|$)/,
+      },
+      {
+        name: "Areas for Enhancement",
+        pattern: /Areas for Enhancement:[\s\S]+?(?=Recommendations|$)/,
+      },
+      { name: "Recommendations", pattern: /Recommendations:[\s\S]+?(?=---|$)/ },
     ];
 
     const issues = [];
     const missing = [];
 
+    // Validate section presence
     for (const section of requiredSections) {
       if (!section.pattern.test(analysis)) {
         missing.push(section.name);
       }
     }
 
-    const wordCount = analysis.split(/\s+/).length;
-    if (wordCount > 150) {
-      issues.push(`Response too long (${wordCount} words)`);
-    }
-
-    const inappropriatePhrases = [
-      'our team',
-      'join us',
-      'we are looking',
-      'our company',
-      'welcome aboard',
-      'welcome to the team'
+    // Check for inappropriate language
+    const inappropriateTerms = [
+      "our company",
+      "our team",
+      "we are",
+      "join us",
+      "welcome aboard",
+      "pleased to offer",
     ];
 
-    for (const phrase of inappropriatePhrases) {
-      if (analysis.toLowerCase().includes(phrase)) {
-        issues.push(`Contains inappropriate phrase: "${phrase}"`);
+    inappropriateTerms.forEach((term) => {
+      if (analysis.toLowerCase().includes(term)) {
+        issues.push(`Contains inappropriate term: "${term}"`);
       }
+    });
+
+    // Validate length
+    const words = analysis.split(/\s+/).length;
+    if (words > 500) {
+      issues.push("Analysis exceeds maximum length");
     }
 
     return {
       isValid: missing.length === 0 && issues.length === 0,
       missing,
       issues,
-      wordCount
+      wordCount: words,
     };
   }
 
-  parseMatchScore(analysis) {
-    const scoreMatch = analysis.match(/Match Score:\s*(\d+)/i);
-    return scoreMatch ? Math.min(100, Math.max(0, parseInt(scoreMatch[1]))) : 0;
+  async retry(operation, maxRetries = MAX_RETRIES) {
+    for (let i = 0; i < maxRetries; i++) {
+      try {
+        return await operation();
+      } catch (error) {
+        if (i === maxRetries - 1) throw error;
+        await new Promise((resolve) =>
+          setTimeout(resolve, RETRY_DELAY * (i + 1))
+        );
+        console.log(`Retry attempt ${i + 1}/${maxRetries}`);
+      }
+    }
   }
 
-  async cleanup() {
-    console.log('Assistant Service cleanup completed');
+  async waitForCompletion(threadId, runId, maxAttempts = MAX_ATTEMPTS) {
+    for (let i = 0; i < maxAttempts; i++) {
+      try {
+        const run = await this.retry(() =>
+          this.client.beta.threads.runs.retrieve(threadId, runId)
+        );
+
+        console.log(`Run status check ${i + 1}/${maxAttempts}:`, run.status);
+
+        switch (run.status) {
+          case "completed":
+            return run;
+          case "failed":
+          case "cancelled":
+          case "expired":
+            throw new ErrorHandler(
+              `Assistant run ${run.status}: ${run.last_error?.message || "Unknown error"}`,
+              500
+            );
+          case "queued":
+          case "in_progress":
+            await new Promise((resolve) => setTimeout(resolve, 1000));
+            break;
+          default:
+            throw new ErrorHandler(`Unknown run status: ${run.status}`, 500);
+        }
+      } catch (error) {
+        logError(error, {
+          context: "Wait For Completion",
+          threadId,
+          runId,
+          attempt: i + 1,
+        });
+        throw error;
+      }
+    }
+
+    throw new ErrorHandler("Assistant analysis timed out", 500);
+  }
+
+  generateFallbackAnalysis() {
+    const recruiterFeedback = `
+Match Score: 50
+
+Initial Feedback:
+Application pending manual review.
+
+Strengths Identified:
+- To be evaluated
+- Pending review
+
+Areas for Enhancement:
+- To be determined during review
+- Awaiting detailed assessment
+
+Recommendations:
+Await manual review completion`;
+
+    const candidateEmail = `
+Subject: Application Status Update
+
+Dear Candidate,
+
+Thank you for submitting your application. We have received your documentation and it is currently under review.
+
+Our team will carefully evaluate your qualifications against the position requirements and will be in touch with next steps.
+
+Best regards,
+Recruitment Team`;
+
+    return {
+      success: true,
+      analysis: this.combineAnalysis(recruiterFeedback, candidateEmail),
+      recruiterAnalysis: recruiterFeedback,
+      candidateEmail: candidateEmail,
+      score: 50,
+      validation: {
+        isValid: true,
+        missing: [],
+        issues: [],
+        wordCount: 89,
+      },
+    };
+  }
+
+  combineAnalysis(recruiterAnalysis, candidateEmail) {
+    return `
+1. INTERNAL RECRUITER ANALYSIS:
+${recruiterAnalysis}
+
+---
+
+2. CANDIDATE FEEDBACK EMAIL:
+${candidateEmail}`;
+  }
+
+  async cleanupThread(thread) {
+    if (!thread?.id) return;
+
+    try {
+      await this.client.beta.threads.del(thread.id);
+      console.log("Thread cleanup completed:", thread.id);
+    } catch (error) {
+      logError(error, {
+        context: "Thread Cleanup",
+        threadId: thread.id,
+      });
+    }
   }
 }
 
