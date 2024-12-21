@@ -353,87 +353,85 @@ export const regenerateFeedback = catchAsyncErrors(async (req, res, next) => {
     return next(new ErrorHandler(error.message || "Failed to regenerate feedback", 500));
   }
 });
-export const employerGetAllApplications = catchAsyncErrors(
-  async (req, res, next) => {
-    const { role } = req.user;
-    if (role === "Job Seeker") {
-      return next(
-        new ErrorHandler("Job Seeker not allowed to access this resource.", 400)
-      );
-    }
-    // Add pagination
-    const page = parseInt(req.query.page) || 1;
-    const limit = parseInt(req.query.limit) || 10;
-    const skip = (page - 1) * limit;
-
-    // Get total count for pagination
-    const totalCount = await Application.countDocuments({
-      "employerID.user": req.user._id,
-    });
-
-    // Add field selection and pagination
-    const applications = await Application.find({
-      "employerID.user": req.user._id,
-    })
-      .select(
-        "name email phone address coverLetter resume analysis matchScore createdAt"
-      )
-      .sort({ createdAt: -1 })
-      .skip(skip)
-      .limit(limit)
-      .lean(); // Convert to plain JS object for better performance
-
-    res.status(200).json({
-      success: true,
-      applications,
-      currentPage: page,
-      totalPages: Math.ceil(totalCount / limit),
-      totalApplications: totalCount,
-    });
+export const employerGetAllApplications = catchAsyncErrors(async (req, res, next) => {
+  const { role } = req.user;
+  if (role === "Job Seeker") {
+    return next(new ErrorHandler("Job Seeker not allowed to access this resource.", 400));
   }
-);
+  
+  // Add pagination
+  const page = parseInt(req.query.page) || 1;
+  const limit = parseInt(req.query.limit) || 10;
+  const skip = (page - 1) * limit;
 
-export const jobseekerGetAllApplications = catchAsyncErrors(
-  async (req, res, next) => {
-    const { role } = req.user;
-    if (role === "Employer") {
-      return next(
-        new ErrorHandler("Employer not allowed to access this resource.", 400)
-      );
-    }
+  // Get total count for pagination
+  const totalCount = await Application.countDocuments({
+    "employerID.user": req.user._id,
+  });
 
-    // Add pagination
-    const page = parseInt(req.query.page) || 1;
-    const limit = parseInt(req.query.limit) || 10;
-    const skip = (page - 1) * limit;
+  // Add field selection and pagination - now including candidateEmail
+  const applications = await Application.find({
+    "employerID.user": req.user._id,
+  })
+    .select(
+      "name email phone address coverLetter resume analysis candidateEmail matchScore createdAt emailSent sentEmail"
+    )
+    .sort({ createdAt: -1 })
+    .skip(skip)
+    .limit(limit)
+    .lean(); // Convert to plain JS object for better performance
 
-    // Get total count for pagination
-    const totalCount = await Application.countDocuments({
-      "applicantID.user": req.user._id,
-    });
+  // Log what's being sent
+  console.log('Sending applications with data:', applications.map(app => ({
+    id: app._id,
+    hasAnalysis: !!app.analysis,
+    hasCandidateEmail: !!app.candidateEmail,
+    matchScore: app.matchScore
+  })));
 
-    // Add field selection and pagination
-    const applications = await Application.find({
-      "applicantID.user": req.user._id,
-    })
-      .select(
-        "name email coverLetter resume analysis matchScore jobId createdAt"
-      )
-      .sort({ createdAt: -1 })
-      .skip(skip)
-      .limit(limit)
-      .lean();
+  res.status(200).json({
+    success: true,
+    applications,
+    currentPage: page,
+    totalPages: Math.ceil(totalCount / limit),
+    totalApplications: totalCount,
+  });
+});
 
-    res.status(200).json({
-      success: true,
-      applications,
-      currentPage: page,
-      totalPages: Math.ceil(totalCount / limit),
-      totalApplications: totalCount,
-    });
+export const jobseekerGetAllApplications = catchAsyncErrors(async (req, res, next) => {
+  const { role } = req.user;
+  if (role === "Employer") {
+    return next(
+      new ErrorHandler("Employer not allowed to access this resource.", 400)
+    );
   }
-);
 
+  const { _id } = req.user;
+  
+  // Enhanced populate configuration
+  const applications = await Application.find({ "applicantID.user": _id })
+    .populate({
+      path: 'jobId',
+      select: 'title location city country fixedSalary salaryFrom salaryTo', // Specify the fields we need
+      model: 'Job' // Explicitly specify the model
+    })
+    .sort({ createdAt: -1 });
+  
+  // Add debug logging
+  console.log('Applications query result:', JSON.stringify({
+    count: applications.length,
+    sample: applications[0] ? {
+      id: applications[0]._id,
+      jobId: applications[0].jobId,
+      hasJobDetails: !!applications[0].jobId
+    } : null
+  }, null, 2));
+
+  res.status(200).json({
+    success: true,
+    applications,
+  });
+});
 export const jobseekerDeleteApplication = catchAsyncErrors(
   async (req, res, next) => {
     const { role } = req.user;
