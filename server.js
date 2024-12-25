@@ -5,6 +5,7 @@ import ErrorHandler from "./middlewares/error.js";
 import { config } from "dotenv";
 import path from 'path';
 import { fileURLToPath } from 'url';
+import emailService from './utils/emailService.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -116,6 +117,21 @@ const startServer = async () => {
   }
 };
 
+// Test email configuration
+if (process.env.SMTP_USER) {
+  try {
+    await emailService.initialize();
+    await emailService.sendEmail({
+      email: process.env.SMTP_USER,  // Send test email to yourself
+      subject: "RecruitPilot Email System Test",
+      message: "Email system is working!"
+    });
+    console.log('Email system initialized successfully');
+  } catch (error) {
+    console.error('Email setup test failed:', error);
+  }
+}
+
 const gracefulShutdown = async (signal) => {
   console.log(`\n${signal} received. Starting graceful shutdown...`);
   try {
@@ -133,6 +149,9 @@ const gracefulShutdown = async (signal) => {
 // Handle graceful shutdowns
 process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
 process.on('SIGINT', () => gracefulShutdown('SIGINT'));
+
+
+
 
 // Start the server
 startServer();

@@ -4,6 +4,7 @@ import { catchAsyncErrors } from "../middlewares/catchAsyncError.js";
 import ErrorHandler from "../middlewares/error.js";
 import { uploadToGridFS, getFileFromGridFS } from "../utils/gridfsStorage.js";
 import assistantService from "../utils/assistantService.js";
+import emailService from "../utils/emailService.js";
 
 const analyzeWithOpenAI = async (cvText, jobDescription) => {
   try {
@@ -235,9 +236,16 @@ export const getResume = catchAsyncErrors(async (req, res, next) => {
   }
 });
 
+
+
 export const sendFeedbackEmail = catchAsyncErrors(async (req, res, next) => {
   const { applicationId } = req.params;
   const { customEmail } = req.body;
+
+  console.log('Received feedback request:', {
+    applicationId,
+    hasCustomEmail: !!customEmail
+  });
 
   const application = await Application.findById(applicationId);
   if (!application) {
@@ -245,21 +253,27 @@ export const sendFeedbackEmail = catchAsyncErrors(async (req, res, next) => {
   }
 
   try {
-    // TODO: Implement your email sending logic here
-    // For now, we'll just mark it as sent
+    // Get associated job details for better context
+    const job = await Job.findById(application.jobId);
+    const jobTitle = job ? job.title : 'Position';
+
+    // Send email using emailService
+    await emailService.sendFeedbackEmail(application, customEmail, jobTitle);
+
+    // Update application status
     application.emailSent = true;
     application.sentEmail = customEmail || application.candidateEmail;
     await application.save();
 
     res.status(200).json({
       success: true,
-      message: "Feedback email sent successfully",
+      message: "Feedback email sent successfully"
     });
   } catch (error) {
+    console.error('Email sending error:', error);
     next(new ErrorHandler("Failed to send feedback email", 500));
   }
 });
-
 export const regenerateFeedback = catchAsyncErrors(async (req, res, next) => {
   const { applicationId } = req.params;
 
@@ -546,4 +560,5 @@ export default {
   employerGetAllApplications,
   jobseekerGetAllApplications,
   jobseekerDeleteApplication,
+  sendFeedbackEmail,
 };
