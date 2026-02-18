@@ -55,7 +55,7 @@ app.use(
   fileUpload({
     useTempFiles: true,
     tempFileDir: "/tmp/",
-    debug: process.env.NODE_ENV === 'development',
+    debug: false,
     createParentPath: true,
     preserveExtension: true,
     limits: { fileSize: 5 * 1024 * 1024 },
