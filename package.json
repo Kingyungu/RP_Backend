@@ -11,7 +11,7 @@
     "build": "npm install",
     "lint": "eslint .",
     "format": "prettier --write .",
-    "postinstall": "patch-package"
+    "postinstall": "node scripts/patch-node-compat.mjs"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.577.0",
@@ -40,7 +40,6 @@
     "eslint": "^8.56.0",
     "jest": "^29.7.0",
     "nodemon": "^3.1.7",
-    "patch-package": "^8.0.0",
-    "prettier": "^3.2.5"
+"prettier": "^3.2.5"
   }
 }
