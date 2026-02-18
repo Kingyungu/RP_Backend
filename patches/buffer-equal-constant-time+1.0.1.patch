@@ -1,7 +1,7 @@
-diff --git a/node_modules/buffer-equal-constant-time/index.js b/node_modules/buffer-equal-constant-time/index.js
+diff --git a/index.js b/index.js
 index a4ec453..6d6c49b 100644
---- a/node_modules/buffer-equal-constant-time/index.js
-+++ b/node_modules/buffer-equal-constant-time/index.js
+--- a/index.js
++++ b/index.js
 @@ -28,13 +28,18 @@ function bufferEq(a, b) {
  }
 
