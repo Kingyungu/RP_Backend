@@ -5,10 +5,26 @@ import ErrorHandler from "./error.js";
 import jwt from "jsonwebtoken";
 
 export const isAuthenticated = catchAsyncErrors(async (req, res, next) => {
-  const { token } = req.cookies;
+  // X-Auth-Role header lets the frontend specify which session to use
+  // when both employer and job seeker are logged in simultaneously
+  const roleHint = req.headers['x-auth-role'];
 
-  // Check for token in cookies and headers
-  const authToken = token || req.headers.authorization?.split(' ')[1];
+  let authToken;
+  if (roleHint === 'Employer') {
+    authToken = req.cookies.employerToken;
+  } else if (roleHint === 'Job Seeker') {
+    authToken = req.cookies.seekerToken;
+  } else {
+    // No hint: try employer cookie, then seeker cookie, then Authorization header
+    authToken = req.cookies.employerToken
+      || req.cookies.seekerToken
+      || req.headers.authorization?.split(' ')[1];
+  }
+
+  // Always fall back to Authorization header if cookie not found
+  if (!authToken) {
+    authToken = req.headers.authorization?.split(' ')[1];
+  }
 
   if (!authToken) {
     return next(new ErrorHandler("Please login to access this resource", 401));

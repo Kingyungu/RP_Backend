@@ -25,7 +25,7 @@ app.use(cors({
   origin: true, // Allow requests from any origin
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization', 'Cookie'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'Cookie', 'X-Auth-Role'],
   exposedHeaders: ['set-cookie']
 }));
 

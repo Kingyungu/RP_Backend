@@ -14,8 +14,11 @@ export const sendToken = (user, statusCode, res, message) => {
     domain: process.env.NODE_ENV === 'production' ? process.env.COOKIE_DOMAIN : undefined
   };
 
+  // Use role-specific cookie so both employer and job seeker can be logged in simultaneously
+  const cookieName = user.role === 'Employer' ? 'employerToken' : 'seekerToken';
+
   res.status(statusCode)
-    .cookie("token", token, options)
+    .cookie(cookieName, token, options)
     .json({
       success: true,
       user,
